@@ -4,18 +4,18 @@ from passlib.context import CryptContext
 from jose import jwt
 import uuid
 from app.core.config import settings
+from app.models.token import UserRole
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def create_access_token(
-    subject: Union[str, Any], 
-    expires_delta: Optional[timedelta] = None,
     tenant_ids: Optional[List[str]] = None,
-    roles: Optional[List[str]] = None
+    roles: Optional[List[str]] = None,
+    expires_delta: Optional[timedelta] = None
 ) -> Dict[str, Any]:
     """
-    Create a JWT access token with additional claims.
+    Create a JWT access token with tenant and role claims.
     
     Returns:
         Dict containing the token and its metadata
@@ -32,7 +32,6 @@ def create_access_token(
     
     to_encode = {
         "exp": expire,
-        "sub": str(subject),
         "jti": jti,
         "iat": datetime.utcnow()
     }
@@ -53,9 +52,8 @@ def create_access_token(
     return {
         "token": encoded_jwt,
         "jti": jti,
-        "user_id": str(subject),
         "tenant_ids": tenant_ids or [],
-        "roles": roles or ["user"],
+        "roles": roles or [UserRole.READER],
         "expires_at": expire
     }
 

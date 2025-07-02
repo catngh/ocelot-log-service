@@ -4,23 +4,32 @@ from pymongo.collection import Collection
 from pymongo.database import Database
 from bson import ObjectId
 
-from app.api.deps import get_tenant_collection, get_db, get_current_user
-from app.models.user import TokenData
+from app.api.deps import (
+    get_tenant_collection, 
+    get_db, 
+    get_current_token,
+    require_admin
+)
+from app.models.token import TokenData
 from app.models.tenant import Tenant, TenantCreate, TenantUpdate, TenantInDB
+from app.models.response import ResponseWrapper, PaginatedResponseWrapper
 from app.core.security import get_password_hash
 
 router = APIRouter()
 
 
-@router.post("", response_model=Tenant, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ResponseWrapper[Tenant], status_code=status.HTTP_201_CREATED)
 async def create_tenant(
     tenant: TenantCreate,
     collection: Collection = Depends(get_tenant_collection),
     db: Database = Depends(get_db),
-    current_user: TokenData = Depends(get_current_user),
+    token_data: TokenData = Depends(get_current_token),
+    _: bool = Depends(require_admin),
 ):
     """
     Create a new tenant.
+    
+    Requires admin role.
     """
     # Check if tenant ID already exists
     if collection.find_one({"tenant_id": tenant.tenant_id}):
@@ -49,31 +58,56 @@ async def create_tenant(
             status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found"
         )
     
-    return created_tenant
+    # Wrap the response in a data field
+    return ResponseWrapper(data=created_tenant)
 
 
-@router.get("", response_model=List[Tenant])
+@router.get("", response_model=PaginatedResponseWrapper[Tenant])
 async def get_tenants(
     collection: Collection = Depends(get_tenant_collection),
-    current_user: TokenData = Depends(get_current_user),
+    token_data: TokenData = Depends(get_current_token),
+    _: bool = Depends(require_admin),
     skip: int = 0,
     limit: int = 100,
 ):
     """
     Get all tenants.
+    
+    Requires admin role.
     """
+    # Get total count for pagination
+    total_count = collection.count_documents({})
+    
+    # Execute query with pagination
     tenants = list(collection.find().skip(skip).limit(limit))
-    return tenants
+    
+    # Calculate pagination metadata
+    page = skip // limit + 1 if limit > 0 else 1
+    
+    # Wrap the response in a data field with pagination metadata
+    return PaginatedResponseWrapper(
+        data=tenants,
+        meta={
+            "pagination": {
+                "total": total_count,
+                "page": page,
+                "size": limit
+            }
+        }
+    )
 
 
-@router.get("/{tenant_id}", response_model=Tenant)
+@router.get("/{tenant_id}", response_model=ResponseWrapper[Tenant])
 async def get_tenant(
     tenant_id: str = Path(..., title="The ID of the tenant to get"),
     collection: Collection = Depends(get_tenant_collection),
-    current_user: TokenData = Depends(get_current_user),
+    token_data: TokenData = Depends(get_current_token),
+    _: bool = Depends(require_admin),
 ):
     """
     Get a specific tenant by ID.
+    
+    Requires admin role.
     """
     if ObjectId.is_valid(tenant_id):
         tenant = collection.find_one({"_id": ObjectId(tenant_id)})
@@ -85,18 +119,22 @@ async def get_tenant(
             status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found"
         )
     
-    return tenant
+    # Wrap the response in a data field
+    return ResponseWrapper(data=tenant)
 
 
-@router.put("/{tenant_id}", response_model=Tenant)
+@router.put("/{tenant_id}", response_model=ResponseWrapper[Tenant])
 async def update_tenant(
     tenant_update: TenantUpdate,
     tenant_id: str = Path(..., title="The ID of the tenant to update"),
     collection: Collection = Depends(get_tenant_collection),
-    current_user: TokenData = Depends(get_current_user),
+    token_data: TokenData = Depends(get_current_token),
+    _: bool = Depends(require_admin),
 ):
     """
     Update a tenant by ID.
+    
+    Requires admin role.
     """
     # Find tenant
     if ObjectId.is_valid(tenant_id):
@@ -123,7 +161,8 @@ async def update_tenant(
     # Get the updated tenant
     updated_tenant = collection.find_one({"_id": tenant["_id"]})
     
-    return updated_tenant
+    # Wrap the response in a data field
+    return ResponseWrapper(data=updated_tenant)
 
 
 @router.delete("/{tenant_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -131,10 +170,13 @@ async def delete_tenant(
     tenant_id: str = Path(..., title="The ID of the tenant to delete"),
     collection: Collection = Depends(get_tenant_collection),
     db: Database = Depends(get_db),
-    current_user: TokenData = Depends(get_current_user),
+    token_data: TokenData = Depends(get_current_token),
+    _: bool = Depends(require_admin),
 ):
     """
     Delete a tenant by ID.
+    
+    Requires admin role.
     """
     # Find tenant
     if ObjectId.is_valid(tenant_id):

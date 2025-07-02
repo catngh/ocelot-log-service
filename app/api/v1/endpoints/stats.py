@@ -1,24 +1,33 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pymongo.collection import Collection
 from datetime import datetime, timedelta
 
-from app.api.deps import get_logs_collection, get_current_user
-from app.models.user import TokenData
+from app.api.deps import (
+    get_logs_collection, 
+    get_current_token, 
+    require_admin, 
+    require_reader
+)
+from app.models.token import TokenData
 from app.models.log import LogAction, LogSeverity
+from app.models.response import ResponseWrapper
 
 router = APIRouter()
 
 
-@router.get("/count", response_model=Dict[str, int])
+@router.get("/count", response_model=ResponseWrapper[Dict[str, int]])
 async def get_log_count(
     collection: Collection = Depends(get_logs_collection),
-    current_user: TokenData = Depends(get_current_user),
+    token_data: TokenData = Depends(get_current_token),
+    _: bool = Depends(require_reader),
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
 ):
     """
     Get total log count with optional date range filter.
+    
+    Requires reader role only. Writers cannot access stats unless they also have the reader role.
     """
     query = {}
     
@@ -36,18 +45,22 @@ async def get_log_count(
     # Count logs
     log_count = collection.count_documents(query)
     
-    return {"count": log_count}
+    # Wrap the response in a data field
+    return ResponseWrapper(data={"count": log_count})
 
 
-@router.get("/by-severity", response_model=Dict[str, int])
+@router.get("/by-severity", response_model=ResponseWrapper[Dict[str, int]])
 async def get_logs_by_severity(
     collection: Collection = Depends(get_logs_collection),
-    current_user: TokenData = Depends(get_current_user),
+    token_data: TokenData = Depends(get_current_token),
+    _: bool = Depends(require_reader),
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
 ):
     """
     Get log counts grouped by severity level.
+    
+    Requires reader role only. Writers cannot access stats unless they also have the reader role.
     """
     pipeline = []
     
@@ -82,18 +95,22 @@ async def get_logs_by_severity(
         if severity in stats:
             stats[severity] = result["count"]
     
-    return stats
+    # Wrap the response in a data field
+    return ResponseWrapper(data=stats)
 
 
-@router.get("/by-action", response_model=Dict[str, int])
+@router.get("/by-action", response_model=ResponseWrapper[Dict[str, int]])
 async def get_logs_by_action(
     collection: Collection = Depends(get_logs_collection),
-    current_user: TokenData = Depends(get_current_user),
+    token_data: TokenData = Depends(get_current_token),
+    _: bool = Depends(require_reader),
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
 ):
     """
     Get log counts grouped by action type.
+    
+    Requires reader role only. Writers cannot access stats unless they also have the reader role.
     """
     pipeline = []
     
@@ -128,17 +145,21 @@ async def get_logs_by_action(
         if action in stats:
             stats[action] = result["count"]
     
-    return stats
+    # Wrap the response in a data field
+    return ResponseWrapper(data=stats)
 
 
-@router.get("/daily", response_model=List[Dict])
+@router.get("/daily", response_model=ResponseWrapper[List[Dict[str, Any]]])
 async def get_daily_log_counts(
     collection: Collection = Depends(get_logs_collection),
-    current_user: TokenData = Depends(get_current_user),
+    token_data: TokenData = Depends(get_current_token),
+    _: bool = Depends(require_reader),
     days: int = Query(7, ge=1, le=30),
 ):
     """
     Get daily log counts for the specified number of days.
+    
+    Requires reader role only. Writers cannot access stats unless they also have the reader role.
     """
     end_time = datetime.utcnow()
     start_time = end_time - timedelta(days=days)
@@ -187,4 +208,5 @@ async def get_daily_log_counts(
     for date_str, count in date_dict.items():
         daily_counts.append({"date": date_str, "count": count})
     
-    return daily_counts 
+    # Wrap the response in a data field
+    return ResponseWrapper(data=daily_counts) 

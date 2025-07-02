@@ -22,6 +22,11 @@ class LogAction(str, Enum):
     UPDATE = "UPDATE"
     DELETE = "DELETE"
     VIEW = "VIEW"
+    LOGIN = "LOGIN"
+    LOGOUT = "LOGOUT"
+    IMPORT = "IMPORT"
+    EXPORT = "EXPORT"
+    READ = "READ"
 
 
 class LogSeverity(str, Enum):
@@ -32,7 +37,6 @@ class LogSeverity(str, Enum):
 
 
 class LogBase(BaseModel):
-    user_id: str
     session_id: Optional[str] = None
     action: LogAction
     resource_type: str
@@ -74,7 +78,6 @@ class Log(LogBase):
         schema_extra = {
             "example": {
                 "id": "507f1f77bcf86cd799439011",
-                "user_id": "user123",
                 "session_id": "session456",
                 "action": "CREATE",
                 "resource_type": "user",
@@ -94,7 +97,6 @@ class Log(LogBase):
 
 
 class LogQueryParams(BaseModel):
-    user_id: Optional[str] = None
     action: Optional[LogAction] = None
     resource_type: Optional[str] = None
     resource_id: Optional[str] = None

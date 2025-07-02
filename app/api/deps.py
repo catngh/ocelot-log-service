@@ -1,6 +1,6 @@
-from typing import Generator, Optional, Dict, Any
+from typing import Generator, Optional, Dict, Any, List
 from fastapi import Depends, HTTPException, status, Header, Security
-from fastapi.security import OAuth2PasswordBearer, HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
 from pydantic import ValidationError
 from pymongo.database import Database
@@ -9,10 +9,10 @@ from datetime import datetime
 
 from app.db.mongodb import get_database, get_collection, get_jwt_collection
 from app.core.config import settings
-from app.models.user import TokenData
+from app.models.token import TokenData, UserRole
 from app.core.security import decode_token
 
-# Use HTTPBearer instead of OAuth2PasswordBearer since we're not using the login flow
+# Use HTTPBearer for authentication
 security = HTTPBearer(auto_error=True)
 
 
@@ -81,14 +81,13 @@ async def validate_token(token: str) -> Dict[str, Any]:
         
         # Extract claims
         jti = payload.get("jti")
-        user_id = payload.get("sub")
         
-        if not jti or not user_id:
+        if not jti:
             raise credentials_exception
         
         # Check if token exists in database and is not revoked
         jwt_collection = get_jwt_collection()
-        stored_token = jwt_collection.find_one({"jti": jti, "user_id": user_id})
+        stored_token = jwt_collection.find_one({"jti": jti})
         
         if not stored_token:
             raise HTTPException(
@@ -115,16 +114,20 @@ async def validate_token(token: str) -> Dict[str, Any]:
             )
             
         return payload
+    except Exception as e:
+        print(f"Error validating token: {e}")
+        raise credentials_exception
         
     except JWTError:
+        print(f"JWTError: {e}")
         raise credentials_exception
 
 
-async def get_current_user(
+async def get_current_token(
     credentials: HTTPAuthorizationCredentials = Security(security)
 ) -> TokenData:
     """
-    Get current user from JWT token.
+    Get token data from JWT token.
     """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -139,16 +142,11 @@ async def get_current_user(
         # Validate token against database
         payload = await validate_token(token)
         
-        user_id: str = payload.get("sub")
-        if user_id is None:
-            raise credentials_exception
-        
-        # Extract additional claims
+        # Extract claims
         tenant_ids = payload.get("tenant_ids", [])
-        roles = payload.get("roles", ["user"])
+        roles = payload.get("roles", [UserRole.READER])
         
         token_data = TokenData(
-            user_id=user_id,
             tenant_ids=tenant_ids,
             roles=roles
         )
@@ -159,27 +157,48 @@ async def get_current_user(
     return token_data
 
 
-async def get_current_active_user(
-    current_user: TokenData = Depends(get_current_user),
-) -> TokenData:
-    """
-    Get current active user.
-    """
-    # Here you could check if the user is active in the database
-    # For now, we'll just return the token data
-    return current_user
-
-
-async def check_user_tenant_access(
+async def check_tenant_access(
     tenant_id: str = Depends(get_tenant_id),
-    current_user: TokenData = Depends(get_current_user),
+    token_data: TokenData = Depends(get_current_token),
 ) -> bool:
     """
-    Check if the current user has access to the specified tenant.
+    Check if the token has access to the specified tenant.
     """
-    if not current_user.tenant_ids or tenant_id not in current_user.tenant_ids:
+    if not token_data.tenant_ids or tenant_id not in token_data.tenant_ids:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"User does not have access to tenant {tenant_id}",
+            detail=f"Token does not have access to tenant {tenant_id}",
         )
-    return True 
+    return True
+
+
+def check_role_permissions(required_roles: List[str]):
+    """
+    Dependency factory to check if the user has the required role(s).
+    
+    Args:
+        required_roles: List of roles that are allowed to access the endpoint
+        
+    Returns:
+        Dependency function that checks if the user has one of the required roles
+    """
+    async def _check_roles(token_data: TokenData = Depends(get_current_token)):
+        # Admin role has access to everything
+        if UserRole.ADMIN in token_data.roles:
+            return True
+            
+        # Check if the user has any of the required roles
+        if not any(role in token_data.roles for role in required_roles):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Insufficient permissions. Required roles: {', '.join(required_roles)}",
+            )
+        return True
+        
+    return _check_roles
+
+
+# Role-based permission dependencies
+require_admin = check_role_permissions([UserRole.ADMIN])
+require_writer = check_role_permissions([UserRole.ADMIN, UserRole.WRITER])
+require_reader = check_role_permissions([UserRole.ADMIN, UserRole.WRITER, UserRole.READER]) 

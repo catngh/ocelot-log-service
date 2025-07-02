@@ -67,7 +67,6 @@ def setup_collections():
     # Create indexes for common query patterns
     logs_collection.create_index("tenant_id")  # For tenant isolation
     logs_collection.create_index([("tenant_id", 1), ("timestamp", 1)])  # For tenant + time queries
-    logs_collection.create_index([("tenant_id", 1), ("user_id", 1)])  # For tenant + user queries
     logs_collection.create_index([("tenant_id", 1), ("action", 1), ("resource_type", 1)])  # For filtered queries
     logs_collection.create_index([("tenant_id", 1), ("severity", 1)])  # For severity filtering
     logs_collection.create_index([("tenant_id", 1), ("resource_id", 1)])  # For resource queries
@@ -78,17 +77,9 @@ def setup_collections():
     jwt_collection = database["jwt_tokens"]
     # Create indexes for JWT tokens
     jwt_collection.create_index("jti", unique=True)
-    jwt_collection.create_index("user_id")
     jwt_collection.create_index("expires_at")
-    # Create compound index for token validation (user_id + jti + revoked)
-    jwt_collection.create_index([("user_id", 1), ("jti", 1), ("revoked", 1)])
-    
-    # Create users collection
-    users_collection = database["users"]
-    # Create indexes for users
-    users_collection.create_index("email", unique=True)
-    users_collection.create_index("tenant_ids")
-    users_collection.create_index("roles")
+    jwt_collection.create_index("tenant_ids")
+    jwt_collection.create_index("roles")
 
 
 def get_collection(collection_name):
