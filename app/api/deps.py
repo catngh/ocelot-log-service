@@ -113,13 +113,9 @@ async def validate_token(token: str) -> Dict[str, Any]:
                 headers={"WWW-Authenticate": "Bearer"},
             )
             
-        return payload
+        return stored_token
     except Exception as e:
-        print(f"Error validating token: {e}")
-        raise credentials_exception
-        
-    except JWTError:
-        print(f"JWTError: {e}")
+        print(f"Error validating token: {str(e)}")
         raise credentials_exception
 
 
@@ -139,19 +135,37 @@ async def get_current_token(
         # Get token from credentials
         token = credentials.credentials
         
-        # Validate token against database
-        payload = await validate_token(token)
+        # Decode token without verification to get the JTI
+        payload = decode_token(token)
         
-        # Extract claims
-        tenant_ids = payload.get("tenant_ids", [])
-        roles = payload.get("roles", [UserRole.READER])
+        # Extract JTI
+        jti = payload.get("jti")
+        
+        if not jti:
+            raise credentials_exception
+        
+        # Get token data from database
+        jwt_collection = get_jwt_collection()
+        stored_token = jwt_collection.find_one({"jti": jti})
+        
+        if not stored_token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token not found in database",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # Extract claims from stored token instead of payload
+        tenant_ids = stored_token.get("tenant_ids", [])
+        roles = stored_token.get("roles", [])
         
         token_data = TokenData(
             tenant_ids=tenant_ids,
             roles=roles
         )
         
-    except (JWTError, ValidationError):
+    except (JWTError, ValidationError) as e:
+        print(f"Token validation error: {str(e)}")
         raise credentials_exception
     
     return token_data
@@ -183,15 +197,19 @@ def check_role_permissions(required_roles: List[str]):
         Dependency function that checks if the user has one of the required roles
     """
     async def _check_roles(token_data: TokenData = Depends(get_current_token)):
+        # Convert roles to strings for consistent comparison
+        user_roles = [role if isinstance(role, str) else role.value for role in token_data.roles]
+        required_role_values = [role if isinstance(role, str) else role.value for role in required_roles]
+        
         # Admin role has access to everything
-        if UserRole.ADMIN in token_data.roles:
+        if "admin" in user_roles:
             return True
             
-        # Check if the user has any of the required roles
-        if not any(role in token_data.roles for role in required_roles):
+        # Check if any of the user's roles are in the required roles list
+        if not any(user_role in required_role_values for user_role in user_roles):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Insufficient permissions. Required roles: {', '.join(required_roles)}",
+                detail=f"Insufficient permissions. Required roles: {', '.join(required_role_values)}",
             )
         return True
         
@@ -199,6 +217,6 @@ def check_role_permissions(required_roles: List[str]):
 
 
 # Role-based permission dependencies
-require_admin = check_role_permissions([UserRole.ADMIN])
-require_writer = check_role_permissions([UserRole.ADMIN, UserRole.WRITER])
-require_reader = check_role_permissions([UserRole.ADMIN, UserRole.WRITER, UserRole.READER]) 
+require_admin = check_role_permissions(["admin"])
+require_writer = check_role_permissions(["admin", "writer"])
+require_reader = check_role_permissions(["admin", "writer", "reader"]) 

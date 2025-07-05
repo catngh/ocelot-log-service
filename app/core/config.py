@@ -3,14 +3,16 @@ from typing import Any, Dict, Optional, List
 from pydantic_settings import BaseSettings
 from pydantic import AnyHttpUrl, validator
 from dotenv import load_dotenv
+import pathlib
 
-# Load .env file explicitly
-print(f"Loading environment from .env file (exists: {os.path.exists('.env')})")
-load_dotenv()
+# Get the project root directory - this ensures we find the .env file regardless of where the script is run from
+ROOT_DIR = pathlib.Path(__file__).parent.parent.parent
+env_path = os.path.join(ROOT_DIR, '.env')
 
 class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     PROJECT_NAME: str = "Ocelot Log Service"
+    SERVICE_NAME_PREFIX: str = "ocelot"
     ENVIRONMENT: str = "development"
     DEBUG: bool = False
     
@@ -33,13 +35,23 @@ class Settings(BaseSettings):
     
     # OpenSearch Configuration
     OPENSEARCH_URL: Optional[str] = None
-    OPENSEARCH_USERNAME: Optional[str] = None
-    OPENSEARCH_PASSWORD: Optional[str] = None
     
     class Config:
-        env_file = ".env"
+        env_file = env_path
         case_sensitive = True
 
 
-settings = Settings()
-print(f"Loaded settings: MONGODB_URL={settings.MONGODB_URL}, PROJECT_NAME={settings.PROJECT_NAME}") 
+def load_config() -> Settings:
+    """
+    Load and initialize settings.
+    
+    Returns:
+        Settings: Initialized settings object
+    """
+    # Load .env file explicitly from project root
+    load_dotenv(dotenv_path=env_path)
+    config = Settings()
+    return config
+
+
+settings = load_config() 

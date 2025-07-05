@@ -1,4 +1,4 @@
-.PHONY: help setup dev test lint clean deploy
+.PHONY: help setup dev test lint clean deploy sqs-worker sync-opensearch
 
 help:  ## Show this help menu
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -10,6 +10,9 @@ setup:  ## Set up the development environment
 
 dev:  ## Run the development server
 	. venv/bin/activate && python3 -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+
+sync-opensearch:  ## Sync logs from MongoDB to OpenSearch
+	. venv/bin/activate && python3 scripts/sync_mongodb_to_opensearch.py
 
 test:  ## Run tests
 	. venv/bin/activate && pytest tests/

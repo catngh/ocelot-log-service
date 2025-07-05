@@ -15,44 +15,47 @@ from app.api.deps import (
 from app.models.token import TokenData
 from app.models.log import Log, LogCreate, LogBulkCreate, LogQueryParams, LogInDB
 from app.models.response import ResponseWrapper, PaginatedResponseWrapper
+from app.services.sqs_service import get_sqs_service, SQSService
+from app.services.opensearch_service import get_opensearch_service, OpenSearchService
+from app.core.config import settings
 
 router = APIRouter()
 
-
-@router.post("", response_model=ResponseWrapper[Log], status_code=status.HTTP_201_CREATED)
-async def create_log(
-    log: LogCreate,
-    collection: Collection = Depends(get_logs_collection),
-    token_data: TokenData = Depends(get_current_token),
-    tenant_id: str = Depends(get_tenant_id),
-    _: bool = Depends(require_writer),
-):
-    """
-    Create a new log entry.
+# Add log directly to db, reserved for testing
+# @router.post("", response_model=ResponseWrapper[Log], status_code=status.HTTP_201_CREATED)
+# async def create_log(
+#     log: LogCreate,
+#     collection: Collection = Depends(get_logs_collection),
+#     token_data: TokenData = Depends(get_current_token),
+#     tenant_id: str = Depends(get_tenant_id),
+#     _: bool = Depends(require_admin),
+# ):
+#     """
+#     Create a new log entry.
     
-    Requires writer role only. Readers cannot create logs.
-    """
-    # Create a LogInDB object with timestamp and tenant_id
-    log_dict = log.dict()
-    log_dict["timestamp"] = datetime.utcnow()
-    log_dict["tenant_id"] = tenant_id  # Add tenant_id for tenant isolation
+#     Requires writer role only. Readers cannot create logs.
+#     """
+#     # Create a LogInDB object with timestamp and tenant_id
+#     log_dict = log.dict()
+#     log_dict["timestamp"] = datetime.utcnow()
+#     log_dict["tenant_id"] = tenant_id  # Add tenant_id for tenant isolation
     
-    # Insert into MongoDB
-    result = collection.insert_one(log_dict)
+#     # Insert into MongoDB
+#     result = collection.insert_one(log_dict)
     
-    # Get the created log
-    created_log = collection.find_one({"_id": result.inserted_id})
+#     # Get the created log
+#     created_log = collection.find_one({"_id": result.inserted_id})
     
-    if created_log is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Log not found"
-        )
+#     if created_log is None:
+#         raise HTTPException(
+#             status_code=status.HTTP_404_NOT_FOUND, detail="Log not found"
+#         )
     
-    # Convert MongoDB _id to id for response
-    created_log["id"] = str(created_log["_id"])
+#     # Convert MongoDB _id to id for response
+#     created_log["id"] = str(created_log["_id"])
     
-    # Wrap the response in a data field
-    return ResponseWrapper(data=created_log)
+#     # Wrap the response in a data field
+#     return ResponseWrapper(data=created_log)
 
 
 @router.post("/bulk", response_model=ResponseWrapper[List[Log]], status_code=status.HTTP_201_CREATED)
@@ -94,16 +97,28 @@ async def create_logs_bulk(
 @router.get("", response_model=PaginatedResponseWrapper[Log])
 async def get_logs(
     query_params: LogQueryParams = Depends(),
-    collection: Collection = Depends(get_logs_collection),
+    opensearch_service: OpenSearchService = Depends(get_opensearch_service),
     token_data: TokenData = Depends(get_current_token),
     tenant_id: str = Depends(get_tenant_id),
     _: bool = Depends(require_reader),
 ):
     """
     Get logs with filtering and pagination.
+    Uses OpenSearch for improved search capabilities.
     
     Requires reader role only. Writers cannot read logs unless they also have the reader role.
     """
+    try:
+        # Search logs in OpenSearch
+        results = opensearch_service.search_logs(tenant_id, query_params)
+        return PaginatedResponseWrapper(**results)
+    except Exception as e:
+        print(f"OpenSearch error: {str(e)}. Falling back to MongoDB.")
+        # Fall back to MongoDB if OpenSearch fails
+    
+    # MongoDB fallback
+    collection = get_logs_collection()
+    
     # Start with tenant_id filter for tenant isolation
     query = {"tenant_id": tenant_id}
     
@@ -119,6 +134,19 @@ async def get_logs(
     
     if query_params.severity:
         query["severity"] = query_params.severity
+    
+    # Additional filters
+    if query_params.session_id:
+        query["session_id"] = query_params.session_id
+    
+    if query_params.ip_address:
+        query["ip_address"] = query_params.ip_address
+    
+    if query_params.request_id:
+        query["request_id"] = query_params.request_id
+    
+    if query_params.user_id:
+        query["metadata.user_id"] = query_params.user_id
     
     # Date range filter
     date_query = {}
@@ -164,13 +192,14 @@ async def get_logs(
 @router.get("/{log_id}", response_model=ResponseWrapper[Log])
 async def get_log(
     log_id: str = Path(..., title="The ID of the log to get"),
-    collection: Collection = Depends(get_logs_collection),
+    opensearch_service: OpenSearchService = Depends(get_opensearch_service),
     token_data: TokenData = Depends(get_current_token),
     tenant_id: str = Depends(get_tenant_id),
     _: bool = Depends(require_reader),
 ):
     """
     Get a specific log by ID.
+    Uses OpenSearch when enabled, otherwise falls back to MongoDB.
     
     Requires reader role only. Writers cannot read logs unless they also have the reader role.
     """
@@ -179,16 +208,219 @@ async def get_log(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid log ID"
         )
     
-    # Query with tenant_id for tenant isolation
-    log = collection.find_one({"_id": ObjectId(log_id), "tenant_id": tenant_id})
+    log = None
+    
+    try:
+        log = opensearch_service.get_log_by_id(log_id, tenant_id)
+    except Exception as e:
+        print(f"OpenSearch error: {str(e)}. Falling back to MongoDB")
+    
+    # Fall back to MongoDB if log not found in OpenSearch or OpenSearch is disabled
+    if log is None:
+        collection = get_logs_collection()
+        # Query with tenant_id for tenant isolation
+        mongo_log = collection.find_one({"_id": ObjectId(log_id), "tenant_id": tenant_id})
+        
+        if mongo_log is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Log not found"
+            )
+        
+        # Convert MongoDB _id to id for response
+        mongo_log["id"] = str(mongo_log["_id"])
+        log = mongo_log
+    
+    # Wrap the response in a data field
+    return ResponseWrapper(data=log)
+
+# Primary endpoint for creating logs
+@router.post("/produce", response_model=ResponseWrapper[Dict[str, Any]], status_code=status.HTTP_202_ACCEPTED)
+async def produce_log(
+    log: LogCreate,
+    sqs_service: SQSService = Depends(get_sqs_service),
+    token_data: TokenData = Depends(get_current_token),
+    tenant_id: str = Depends(get_tenant_id),
+    _: bool = Depends(require_writer),
+):
+    """
+    Send a log entry to SQS queue for asynchronous processing.
+    
+    Requires writer role only. Readers cannot create logs.
+    """
+    # Create a message with timestamp and tenant_id
+    message = log.dict()
+    message["timestamp"] = datetime.utcnow().isoformat()
+    message["tenant_id"] = tenant_id  # Add tenant_id for tenant isolation
+    
+    # Send to SQS
+    response = sqs_service.send_message(message)
+    
+    # Return the SQS message ID
+    return ResponseWrapper(data={"message_id": response["MessageId"], "status": "queued"})
+
+
+@router.post("/bulk/produce", response_model=ResponseWrapper[Dict[str, Any]], status_code=status.HTTP_202_ACCEPTED)
+async def produce_logs_bulk(
+    logs_data: LogBulkCreate,
+    sqs_service: SQSService = Depends(get_sqs_service),
+    token_data: TokenData = Depends(get_current_token),
+    tenant_id: str = Depends(get_tenant_id),
+    _: bool = Depends(require_writer),
+):
+    """
+    Send multiple log entries to SQS queue for asynchronous processing.
+    
+    Requires writer role only. Readers cannot create logs.
+    """
+    message_ids = []
+    
+    # Process each log and send to SQS
+    for log in logs_data.logs:
+        message = log.dict()
+        message["timestamp"] = datetime.utcnow().isoformat()
+        message["tenant_id"] = tenant_id
+        
+        # Send to SQS
+        response = sqs_service.send_message(message)
+        message_ids.append(response["MessageId"])
+    
+    # Return the SQS message IDs
+    return ResponseWrapper(data={"message_ids": message_ids, "count": len(message_ids), "status": "queued"})
+
+
+@router.get("/search", response_model=PaginatedResponseWrapper[Log])
+async def search_logs(
+    query_params: LogQueryParams = Depends(),
+    opensearch_service: OpenSearchService = Depends(get_opensearch_service),
+    token_data: TokenData = Depends(get_current_token),
+    tenant_id: str = Depends(get_tenant_id),
+    _: bool = Depends(require_reader),
+):
+    """
+    Search logs using OpenSearch for improved full-text search capabilities.
+    This endpoint is now an alias for the main GET /logs endpoint.
+    
+    Requires reader role only. Writers cannot read logs unless they also have the reader role.
+    """
+    # Redirect to the main logs endpoint
+    return await get_logs(
+        query_params=query_params,
+        opensearch_service=opensearch_service,
+        token_data=token_data,
+        tenant_id=tenant_id,
+        _=_
+    )
+
+
+@router.post("/index", response_model=ResponseWrapper[Dict[str, Any]], status_code=status.HTTP_200_OK)
+async def index_log_in_opensearch(
+    log_id: str = Query(..., description="The ID of the log to index in OpenSearch"),
+    opensearch_service: OpenSearchService = Depends(get_opensearch_service),
+    token_data: TokenData = Depends(get_current_token),
+    tenant_id: str = Depends(get_tenant_id),
+    _: bool = Depends(require_admin),
+):
+    """
+    Manually index a log in OpenSearch.
+    
+    Requires admin role.
+    """
+    # Check if log_id is valid
+    if not ObjectId.is_valid(log_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid log ID"
+        )
+    
+    # Get log from MongoDB
+    collection = get_logs_collection()
+    log = collection.find_one({"_id": ObjectId(log_id)})
     
     if log is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Log not found"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Log not found"
         )
     
-    # Convert MongoDB _id to id for response
-    log["id"] = str(log["_id"])
+    # Check tenant isolation
+    if log.get("tenant_id") != tenant_id and "admin" not in token_data.roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied to this log"
+        )
     
-    # Wrap the response in a data field
-    return ResponseWrapper(data=log) 
+    try:
+        # Convert ObjectId to string
+        log["_id"] = str(log["_id"])
+        
+        # Index in OpenSearch
+        result = opensearch_service.index_log(log)
+        
+        return ResponseWrapper(data={
+            "message": "Log indexed successfully",
+            "opensearch_id": result["_id"],
+            "log_id": log_id
+        })
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to index log: {str(e)}"
+        )
+
+
+@router.post("/index/bulk", response_model=ResponseWrapper[Dict[str, Any]], status_code=status.HTTP_200_OK)
+async def bulk_index_logs(
+    start_time: Optional[datetime] = Query(None, description="Start time for logs to index"),
+    end_time: Optional[datetime] = Query(None, description="End time for logs to index"),
+    limit: int = Query(100, description="Maximum number of logs to index", ge=1, le=1000),
+    opensearch_service: OpenSearchService = Depends(get_opensearch_service),
+    token_data: TokenData = Depends(get_current_token),
+    tenant_id: str = Depends(get_tenant_id),
+    _: bool = Depends(require_admin),
+):
+    """
+    Bulk index logs in OpenSearch.
+    
+    Requires admin role.
+    """
+    # Build query
+    query = {"tenant_id": tenant_id}
+    
+    # Date range filter
+    if start_time or end_time:
+        date_query = {}
+        if start_time:
+            date_query["$gte"] = start_time
+        if end_time:
+            date_query["$lte"] = end_time
+        query["timestamp"] = date_query
+    
+    # Get logs from MongoDB
+    collection = get_logs_collection()
+    logs = list(collection.find(query).limit(limit))
+    
+    if not logs:
+        return ResponseWrapper(data={"message": "No logs found to index", "count": 0})
+    
+    # Index logs in OpenSearch
+    indexed_count = 0
+    errors = []
+    
+    for log in logs:
+        try:
+            # Convert ObjectId to string
+            log["_id"] = str(log["_id"])
+            
+            # Index in OpenSearch
+            opensearch_service.index_log(log)
+            indexed_count += 1
+        except Exception as e:
+            errors.append({"log_id": str(log["_id"]), "error": str(e)})
+    
+    return ResponseWrapper(data={
+        "message": "Bulk indexing completed",
+        "total": len(logs),
+        "indexed": indexed_count,
+        "errors": len(errors),
+        "error_details": errors[:10] if errors else []  # Return first 10 errors only
+    }) 
