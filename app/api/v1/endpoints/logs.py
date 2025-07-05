@@ -21,79 +21,6 @@ from app.core.config import settings
 
 router = APIRouter()
 
-# Add log directly to db, reserved for testing
-# @router.post("", response_model=ResponseWrapper[Log], status_code=status.HTTP_201_CREATED)
-# async def create_log(
-#     log: LogCreate,
-#     collection: Collection = Depends(get_logs_collection),
-#     token_data: TokenData = Depends(get_current_token),
-#     tenant_id: str = Depends(get_tenant_id),
-#     _: bool = Depends(require_admin),
-# ):
-#     """
-#     Create a new log entry.
-    
-#     Requires writer role only. Readers cannot create logs.
-#     """
-#     # Create a LogInDB object with timestamp and tenant_id
-#     log_dict = log.dict()
-#     log_dict["timestamp"] = datetime.utcnow()
-#     log_dict["tenant_id"] = tenant_id  # Add tenant_id for tenant isolation
-    
-#     # Insert into MongoDB
-#     result = collection.insert_one(log_dict)
-    
-#     # Get the created log
-#     created_log = collection.find_one({"_id": result.inserted_id})
-    
-#     if created_log is None:
-#         raise HTTPException(
-#             status_code=status.HTTP_404_NOT_FOUND, detail="Log not found"
-#         )
-    
-#     # Convert MongoDB _id to id for response
-#     created_log["id"] = str(created_log["_id"])
-    
-#     # Wrap the response in a data field
-#     return ResponseWrapper(data=created_log)
-
-
-@router.post("/bulk", response_model=ResponseWrapper[List[Log]], status_code=status.HTTP_201_CREATED)
-async def create_logs_bulk(
-    logs_data: LogBulkCreate,
-    collection: Collection = Depends(get_logs_collection),
-    token_data: TokenData = Depends(get_current_token),
-    tenant_id: str = Depends(get_tenant_id),
-    _: bool = Depends(require_writer),
-):
-    """
-    Create multiple log entries in bulk.
-    
-    Requires writer role only. Readers cannot create logs.
-    """
-    # Add timestamp and tenant_id to each log
-    logs_dict = []
-    for log in logs_data.logs:
-        log_dict = log.dict()
-        log_dict["timestamp"] = datetime.utcnow()
-        log_dict["tenant_id"] = tenant_id  # Add tenant_id for tenant isolation
-        logs_dict.append(log_dict)
-    
-    result = collection.insert_many(logs_dict)
-    
-    # Get the created logs
-    created_logs = list(collection.find(
-        {"_id": {"$in": list(result.inserted_ids)}}
-    ))
-    
-    # Convert MongoDB _id to id for response
-    for log in created_logs:
-        log["id"] = str(log["_id"])
-    
-    # Wrap the response in a data field
-    return ResponseWrapper(data=created_logs)
-
-
 @router.get("", response_model=PaginatedResponseWrapper[Log])
 async def get_logs(
     query_params: LogQueryParams = Depends(),
@@ -234,7 +161,7 @@ async def get_log(
     return ResponseWrapper(data=log)
 
 # Primary endpoint for creating logs
-@router.post("/produce", response_model=ResponseWrapper[Dict[str, Any]], status_code=status.HTTP_202_ACCEPTED)
+@router.post("/", response_model=ResponseWrapper[Dict[str, Any]], status_code=status.HTTP_202_ACCEPTED)
 async def produce_log(
     log: LogCreate,
     sqs_service: SQSService = Depends(get_sqs_service),
@@ -259,7 +186,7 @@ async def produce_log(
     return ResponseWrapper(data={"message_id": response["MessageId"], "status": "queued"})
 
 
-@router.post("/bulk/produce", response_model=ResponseWrapper[Dict[str, Any]], status_code=status.HTTP_202_ACCEPTED)
+@router.post("/bulk", response_model=ResponseWrapper[Dict[str, Any]], status_code=status.HTTP_202_ACCEPTED)
 async def produce_logs_bulk(
     logs_data: LogBulkCreate,
     sqs_service: SQSService = Depends(get_sqs_service),
@@ -286,87 +213,6 @@ async def produce_logs_bulk(
     
     # Return the SQS message IDs
     return ResponseWrapper(data={"message_ids": message_ids, "count": len(message_ids), "status": "queued"})
-
-
-@router.get("/search", response_model=PaginatedResponseWrapper[Log])
-async def search_logs(
-    query_params: LogQueryParams = Depends(),
-    opensearch_service: OpenSearchService = Depends(get_opensearch_service),
-    token_data: TokenData = Depends(get_current_token),
-    tenant_id: str = Depends(get_tenant_id),
-    _: bool = Depends(require_reader),
-):
-    """
-    Search logs using OpenSearch for improved full-text search capabilities.
-    This endpoint is now an alias for the main GET /logs endpoint.
-    
-    Requires reader role only. Writers cannot read logs unless they also have the reader role.
-    """
-    # Redirect to the main logs endpoint
-    return await get_logs(
-        query_params=query_params,
-        opensearch_service=opensearch_service,
-        token_data=token_data,
-        tenant_id=tenant_id,
-        _=_
-    )
-
-
-@router.post("/index", response_model=ResponseWrapper[Dict[str, Any]], status_code=status.HTTP_200_OK)
-async def index_log_in_opensearch(
-    log_id: str = Query(..., description="The ID of the log to index in OpenSearch"),
-    opensearch_service: OpenSearchService = Depends(get_opensearch_service),
-    token_data: TokenData = Depends(get_current_token),
-    tenant_id: str = Depends(get_tenant_id),
-    _: bool = Depends(require_admin),
-):
-    """
-    Manually index a log in OpenSearch.
-    
-    Requires admin role.
-    """
-    # Check if log_id is valid
-    if not ObjectId.is_valid(log_id):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid log ID"
-        )
-    
-    # Get log from MongoDB
-    collection = get_logs_collection()
-    log = collection.find_one({"_id": ObjectId(log_id)})
-    
-    if log is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Log not found"
-        )
-    
-    # Check tenant isolation
-    if log.get("tenant_id") != tenant_id and "admin" not in token_data.roles:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied to this log"
-        )
-    
-    try:
-        # Convert ObjectId to string
-        log["_id"] = str(log["_id"])
-        
-        # Index in OpenSearch
-        result = opensearch_service.index_log(log)
-        
-        return ResponseWrapper(data={
-            "message": "Log indexed successfully",
-            "opensearch_id": result["_id"],
-            "log_id": log_id
-        })
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to index log: {str(e)}"
-        )
-
 
 @router.post("/index/bulk", response_model=ResponseWrapper[Dict[str, Any]], status_code=status.HTTP_200_OK)
 async def bulk_index_logs(

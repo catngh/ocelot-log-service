@@ -7,6 +7,7 @@ import logging
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.db.mongodb import connect_to_mongo, close_mongo_connection
+from app.services.sqs_service import get_sqs_service
 
 # Configure logging
 logging.basicConfig(
@@ -41,6 +42,9 @@ async def startup_event():
     logger.info("Starting up application...")
     connect_to_mongo()
     logger.info("MongoDB connection established")
+    
+    _ = get_sqs_service() # initialize sqs service
+    logger.info("SQS service initialized")
 
 
 @app.on_event("shutdown")

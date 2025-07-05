@@ -53,5 +53,4 @@ def load_config() -> Settings:
     config = Settings()
     return config
 
-
 settings = load_config() 

@@ -97,12 +97,25 @@ class Log(LogBase):
 
 
 class LogQueryParams(BaseModel):
+    # Basic filters
     action: Optional[LogAction] = None
     resource_type: Optional[str] = None
     resource_id: Optional[str] = None
     severity: Optional[LogSeverity] = None
+    
+    # Time range filters
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
+    
+    # Additional common filters
+    user_id: Optional[str] = None
+    session_id: Optional[str] = None
+    ip_address: Optional[str] = None
+    request_id: Optional[str] = None
+    
+    # Full-text search
     search: Optional[str] = None
+    
+    # Pagination
     skip: int = 0
     limit: int = 100 
