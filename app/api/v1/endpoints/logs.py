@@ -1,7 +1,7 @@
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, Query, Body, Path, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Body, Path, status, Request, BackgroundTasks
 from pymongo.collection import Collection
-from datetime import datetime
+from datetime import datetime, timedelta
 from bson import ObjectId
 
 from app.api.deps import (
@@ -17,6 +17,7 @@ from app.models.log import Log, LogCreate, LogBulkCreate, LogQueryParams, LogInD
 from app.models.response import ResponseWrapper, PaginatedResponseWrapper
 from app.services.sqs_service import get_sqs_service, SQSService
 from app.services.opensearch_service import get_opensearch_service, OpenSearchService
+from app.services.audit_service import create_audit_log_task
 from app.core.config import settings
 
 router = APIRouter()
@@ -28,6 +29,8 @@ async def get_logs(
     token_data: TokenData = Depends(get_current_token),
     tenant_id: str = Depends(get_tenant_id),
     _: bool = Depends(require_reader),
+    request: Request = None,
+    background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
     """
     Get logs with filtering and pagination.
@@ -35,12 +38,24 @@ async def get_logs(
     
     Requires reader role only. Writers cannot read logs unless they also have the reader role.
     """
+    # Create audit log task to run in background
+    if background_tasks and request:
+        background_tasks.add_task(
+            create_audit_log_task,
+            tenant_id=tenant_id,
+            token_data=token_data,
+            action="get_logs",
+            resource_path=str(request.url.path) if request else "/api/v1/logs",
+            query_params=dict(query_params),
+            request=request
+        )
+    
     try:
         # Search logs in OpenSearch
         results = opensearch_service.search_logs(tenant_id, query_params)
         return PaginatedResponseWrapper(**results)
     except Exception as e:
-        print(f"OpenSearch error: {str(e)}. Falling back to MongoDB.")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
         # Fall back to MongoDB if OpenSearch fails
     
     # MongoDB fallback
@@ -123,6 +138,8 @@ async def get_log(
     token_data: TokenData = Depends(get_current_token),
     tenant_id: str = Depends(get_tenant_id),
     _: bool = Depends(require_reader),
+    request: Request = None,
+    background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
     """
     Get a specific log by ID.
@@ -130,6 +147,18 @@ async def get_log(
     
     Requires reader role only. Writers cannot read logs unless they also have the reader role.
     """
+    # Create audit log task to run in background
+    if background_tasks and request:
+        background_tasks.add_task(
+            create_audit_log_task,
+            tenant_id=tenant_id,
+            token_data=token_data,
+            action="get_log",
+            resource_path=str(request.url.path) if request else f"/api/v1/logs/{log_id}",
+            query_params={"log_id": log_id},
+            request=request
+        )
+    
     if not ObjectId.is_valid(log_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid log ID"
@@ -140,7 +169,7 @@ async def get_log(
     try:
         log = opensearch_service.get_log_by_id(log_id, tenant_id)
     except Exception as e:
-        print(f"OpenSearch error: {str(e)}. Falling back to MongoDB")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
     
     # Fall back to MongoDB if log not found in OpenSearch or OpenSearch is disabled
     if log is None:
@@ -161,7 +190,7 @@ async def get_log(
     return ResponseWrapper(data=log)
 
 # Primary endpoint for creating logs
-@router.post("/", response_model=ResponseWrapper[Dict[str, Any]], status_code=status.HTTP_202_ACCEPTED)
+@router.post("", response_model=ResponseWrapper[Dict[str, Any]], status_code=status.HTTP_202_ACCEPTED)
 async def produce_log(
     log: LogCreate,
     sqs_service: SQSService = Depends(get_sqs_service),
@@ -269,4 +298,47 @@ async def bulk_index_logs(
         "indexed": indexed_count,
         "errors": len(errors),
         "error_details": errors[:10] if errors else []  # Return first 10 errors only
+    })
+
+@router.delete("", response_model=ResponseWrapper[Dict[str, Any]], status_code=status.HTTP_200_OK)
+async def delete_old_logs(
+    days: int = Query(30, description="Delete logs older than this many days", ge=1),
+    opensearch_service: OpenSearchService = Depends(get_opensearch_service),
+    collection: Collection = Depends(get_logs_collection),
+    token_data: TokenData = Depends(get_current_token),
+    tenant_id: str = Depends(get_tenant_id),
+    _: bool = Depends(require_writer),
+):
+    """
+    Delete logs older than the specified number of days (default: 30).
+    
+    Tenants can only delete their own logs. Requires writer role.
+    """
+    # Calculate the cutoff date
+    cutoff_date = datetime.utcnow() - timedelta(days=days)
+    
+    # Build query - ensure tenant can only delete their own logs
+    query = {
+        "tenant_id": tenant_id,
+        "timestamp": {"$lt": cutoff_date.isoformat()}
+    }
+    
+    # Delete from MongoDB
+    mongo_result = collection.delete_many(query)
+    deleted_count = mongo_result.deleted_count
+    
+    # Try to delete from OpenSearch as well
+    opensearch_deleted = 0
+    opensearch_error = None
+    try:
+        opensearch_deleted = opensearch_service.delete_old_logs(tenant_id, cutoff_date)
+    except Exception as e:
+        opensearch_error = str(e)
+    
+    return ResponseWrapper(data={
+        "message": f"Deleted logs older than {days} days",
+        "deleted_count": deleted_count,
+        "opensearch_deleted": opensearch_deleted,
+        "opensearch_error": opensearch_error,
+        "cutoff_date": cutoff_date.isoformat()
     }) 
