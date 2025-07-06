@@ -18,6 +18,7 @@ from app.models.response import ResponseWrapper, PaginatedResponseWrapper
 from app.services.sqs_service import get_sqs_service, SQSService
 from app.services.opensearch_service import get_opensearch_service, OpenSearchService
 from app.services.audit_service import create_audit_log_task
+from app.services.stream_service import broadcast_log
 from app.core.config import settings
 
 router = APIRouter()
@@ -211,6 +212,19 @@ async def produce_log(
     # Send to SQS
     response = sqs_service.send_message(message)
     
+    # Broadcast the log to WebSocket clients
+    try:
+        # Add a temporary ID for streaming since we don't have the MongoDB ID yet
+        stream_message = message.copy()
+        stream_message["id"] = f"temp-{response['MessageId']}"
+        stream_message["status"] = "queued"  # Indicate this is a queued log, not yet in the database
+        
+        # Broadcast to connected WebSocket clients
+        broadcast_log(tenant_id, stream_message)
+    except Exception as e:
+        # Log error but don't fail the request
+        print(f"Error broadcasting to WebSocket clients: {str(e)}")
+    
     # Return the SQS message ID
     return ResponseWrapper(data={"message_id": response["MessageId"], "status": "queued"})
 
@@ -239,6 +253,19 @@ async def produce_logs_bulk(
         # Send to SQS
         response = sqs_service.send_message(message)
         message_ids.append(response["MessageId"])
+        
+        # Broadcast the log to WebSocket clients
+        try:
+            # Add a temporary ID for streaming since we don't have the MongoDB ID yet
+            stream_message = message.copy()
+            stream_message["id"] = f"temp-{response['MessageId']}"
+            stream_message["status"] = "queued"  # Indicate this is a queued log, not yet in the database
+            
+            # Broadcast to connected WebSocket clients
+            broadcast_log(tenant_id, stream_message)
+        except Exception as e:
+            # Log error but don't fail the request
+            print(f"Error broadcasting to WebSocket clients: {str(e)}")
     
     # Return the SQS message IDs
     return ResponseWrapper(data={"message_ids": message_ids, "count": len(message_ids), "status": "queued"})

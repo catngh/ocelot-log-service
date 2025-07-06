@@ -67,6 +67,12 @@ class LogConsumerWorker:
             if isinstance(message_body.get("timestamp"), str):
                 message_body["timestamp"] = datetime.fromisoformat(message_body["timestamp"].replace("Z", "+00:00"))
             
+            # Get tenant_id from the message
+            tenant_id = message_body.get("tenant_id")
+            if not tenant_id:
+                logger.error("Message missing tenant_id, cannot process")
+                return False
+            
             # Insert log into MongoDB
             result = self.logs_collection.insert_one(message_body)
             logger.info(f"Log inserted into MongoDB with ID: {result.inserted_id}")
