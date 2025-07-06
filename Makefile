@@ -1,4 +1,4 @@
-.PHONY: help setup dev test lint clean deploy sqs-worker sync-opensearch
+.PHONY: help setup dev test test-cov lint clean deploy sqs-worker sync-opensearch
 
 help:  ## Show this help menu
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -15,7 +15,10 @@ sync-opensearch:  ## Sync logs from MongoDB to OpenSearch
 	. venv/bin/activate && python3 scripts/sync_mongodb_to_opensearch.py
 
 test:  ## Run tests
-	. venv/bin/activate && pytest tests/
+	. venv/bin/activate && python3 tests/run_tests.py
+
+test-cov:  ## Run tests with coverage report
+	. venv/bin/activate && python3 tests/run_tests.py --cov=app --cov-report=term --cov-report=html
 
 lint:  ## Run linters
 	. venv/bin/activate && flake8 app/ tests/
@@ -24,6 +27,8 @@ clean:  ## Clean up temporary files
 	rm -rf __pycache__
 	rm -rf .pytest_cache
 	find . -type d -name __pycache__ -exec rm -rf {} +
+	rm -rf htmlcov
+	rm -f .coverage
 
 deploy:  ## Deploy to AWS
 	. venv/bin/activate && python3 infrastructure/deploy.py
