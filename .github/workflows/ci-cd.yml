@@ -1,0 +1,219 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  AWS_REGION: us-east-1 # Change to your AWS region
+  ECR_REPOSITORY_API: ocelot-log-api
+  ECR_REPOSITORY_CONSUMER: ocelot-log-consumer
+  ECS_CLUSTER: ocelot-cluster
+  ECS_SERVICE_API: ocelot-log-api-service
+  ECS_SERVICE_CONSUMER: ocelot-log-consumer-service
+  ECS_TASK_DEFINITION_API: .aws/task-definition-api.json
+  ECS_TASK_DEFINITION_CONSUMER: .aws/task-definition-consumer.json
+  CONTAINER_NAME_API: ocelot-log-api
+  CONTAINER_NAME_CONSUMER: ocelot-log-consumer
+  ECS_LAUNCH_TYPE: EC2 # Set launch type to EC2
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:4.4
+        ports:
+          - 27017:27017
+    
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run tests
+        run: |
+          pytest
+
+  build-and-push:
+    needs: test
+    if: success() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push API image to ECR
+        id: build-api-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_API:$IMAGE_TAG -f Dockerfile.api .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_API:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY_API:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY_API:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_API:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY_API:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Build, tag, and push Consumer image to ECR
+        id: build-consumer-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_CONSUMER:$IMAGE_TAG -f Dockerfile.consumer .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_CONSUMER:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY_CONSUMER:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY_CONSUMER:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY_CONSUMER:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY_CONSUMER:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  deploy-development:
+    needs: build-and-push
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    environment: development
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      
+      - name: Download task definition - API
+        run: |
+          aws ecs describe-task-definition --task-definition ${{ vars.ECS_SERVICE_API }} \
+          --query taskDefinition > .aws/task-definition-api.json
+
+      - name: Download task definition - Consumer
+        run: |
+          aws ecs describe-task-definition --task-definition ${{ vars.ECS_SERVICE_CONSUMER }} \
+          --query taskDefinition > .aws/task-definition-consumer.json
+
+      - name: Fill in the new API image ID in the Amazon ECS task definition
+        id: task-def-api
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: .aws/task-definition-api.json
+          container-name: ${{ env.CONTAINER_NAME_API }}
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_API }}:${{ github.sha }}
+
+      - name: Fill in the new Consumer image ID in the Amazon ECS task definition
+        id: task-def-consumer
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: .aws/task-definition-consumer.json
+          container-name: ${{ env.CONTAINER_NAME_CONSUMER }}
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_CONSUMER }}:${{ github.sha }}
+
+      - name: Deploy Amazon ECS task definition - API
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def-api.outputs.task-definition }}
+          service: ${{ vars.ECS_SERVICE_API }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          launch-type: ${{ env.ECS_LAUNCH_TYPE }}
+
+      - name: Deploy Amazon ECS task definition - Consumer
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def-consumer.outputs.task-definition }}
+          service: ${{ vars.ECS_SERVICE_CONSUMER }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          launch-type: ${{ env.ECS_LAUNCH_TYPE }}
+
+  deploy-production:
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      
+      - name: Download task definition - API
+        run: |
+          aws ecs describe-task-definition --task-definition ${{ vars.ECS_SERVICE_API }} \
+          --query taskDefinition > .aws/task-definition-api.json
+
+      - name: Download task definition - Consumer
+        run: |
+          aws ecs describe-task-definition --task-definition ${{ vars.ECS_SERVICE_CONSUMER }} \
+          --query taskDefinition > .aws/task-definition-consumer.json
+
+      - name: Fill in the new API image ID in the Amazon ECS task definition
+        id: task-def-api
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: .aws/task-definition-api.json
+          container-name: ${{ env.CONTAINER_NAME_API }}
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_API }}:${{ github.sha }}
+
+      - name: Fill in the new Consumer image ID in the Amazon ECS task definition
+        id: task-def-consumer
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: .aws/task-definition-consumer.json
+          container-name: ${{ env.CONTAINER_NAME_CONSUMER }}
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_CONSUMER }}:${{ github.sha }}
+
+      - name: Deploy Amazon ECS task definition - API
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def-api.outputs.task-definition }}
+          service: ${{ vars.ECS_SERVICE_API }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          launch-type: ${{ env.ECS_LAUNCH_TYPE }}
+
+      - name: Deploy Amazon ECS task definition - Consumer
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def-consumer.outputs.task-definition }}
+          service: ${{ vars.ECS_SERVICE_CONSUMER }}
+          cluster: ${{ vars.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          launch-type: ${{ env.ECS_LAUNCH_TYPE }} 

@@ -145,4 +145,68 @@ ocelot-log-service/
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## CI/CD Pipeline
+
+This project uses GitHub Actions for continuous integration and deployment:
+
+### Workflow Overview
+
+1. **Testing**: Runs all tests on every push and pull request
+2. **Build**: On successful merge to main branch, builds Docker images for both API and Consumer services
+3. **Push**: Pushes the images to Amazon ECR with both the commit SHA and latest tags
+4. **Deploy**: Updates the ECS services with the new images using EC2 launch type
+
+### Deployment Environments
+
+This project uses GitHub Environments for environment-specific configuration:
+
+- **Development**: Deployed from the `develop` branch
+- **Production**: Deployed from the `main` branch 
+
+Each environment can have its own configuration variables and secrets:
+
+1. Go to your repository → Settings → Environments → "New environment"
+2. Create environments for `development` and `production`
+3. Add environment variables for each:
+
+#### Required Environment Variables (Variables)
+- `AWS_REGION`: The AWS region where resources are deployed
+- `ECS_CLUSTER`: Name of the ECS cluster
+- `ECS_SERVICE_API`: Name of the ECS service for API
+- `ECS_SERVICE_CONSUMER`: Name of the ECS service for Consumer
+
+### Required Repository Secrets
+
+The following secrets need to be set at the repository level:
+
+- `AWS_ACCESS_KEY_ID`: AWS access key with permissions for ECR and ECS
+- `AWS_SECRET_ACCESS_KEY`: Corresponding secret key
+
+### AWS Resources
+
+The workflow assumes the following AWS resources exist:
+
+- ECR repositories: `ocelot-log-api` and `ocelot-log-consumer`
+- ECS cluster: `ocelot-cluster` with EC2 instances
+- ECS services: `ocelot-log-api-service` and `ocelot-log-consumer-service`
+- EC2 instances with appropriate IAM roles and capacity
+- Parameter Store values for secrets (see task definitions)
+
+### Customization
+
+To customize the workflow, edit the following files:
+
+- `.github/workflows/ci-cd.yml`: The main workflow file
+- `.aws/task-definition-api.json`: ECS task definition for the API service
+- `.aws/task-definition-consumer.json`: ECS task definition for the Consumer service
+
+### EC2 Configuration
+
+The task definitions are configured for the EC2 launch type with the following settings:
+
+- Network mode: bridge
+- Dynamic host port mapping
+- Memory and CPU limits at the container level
+- Placement constraints for availability zone distribution 
