@@ -151,7 +151,6 @@ jobs:
             # Replace ACCOUNT_ID placeholder with actual AWS account ID
             sed -i "s/ACCOUNT_ID/${{ steps.get-aws-account.outputs.aws_account_id }}/g" ${{ env.ECS_TASK_DEFINITION_CONSUMER }}
           fi
-
       - name: Fill in the new API image ID in the Amazon ECS task definition
         id: task-def-api
         uses: aws-actions/amazon-ecs-render-task-definition@v1
