@@ -17,7 +17,7 @@ A high-performance, multi-tenant audit log API service built with FastAPI and Mo
 
 - **Framework**: FastAPI
 - **Database**: MongoDB
-- **API Gateway**: AWS API Gateway
+- **Gateway**: AWS ALB
 - **Message Queue**: AWS SQS
 - **Search Engine**: Amazon OpenSearch
 - **Authentication**: JWT with FastAPI security
@@ -29,8 +29,8 @@ A high-performance, multi-tenant audit log API service built with FastAPI and Mo
 - Python 3.8+
 - MongoDB
 - AWS Account with SQS configured
-- Amazon OpenSearch Service domain (optional)
-- Docker and Docker Compose (optional)
+- Amazon OpenSearch Service domain
+- Docker
 
 ### Installation
 
@@ -47,26 +47,46 @@ A high-performance, multi-tenant audit log API service built with FastAPI and Mo
 
 3. Create a `.env` file with your configuration (see `.env.example`).
 
-4. Start the development server:
+### Running in Development Mode
+
+This codebase consists of two separate services that need to be run simultaneously:
+
+1. **API Service** - Handles HTTP requests, queries, and WebSocket connections
+2. **Consumer Service** - Processes messages from SQS asynchronously 
+
+To run both services in development mode:
+
+1. Start the API development server:
    ```bash
    make dev
    ```
 
-5. Start the SQS consumer worker:
+2. In a separate terminal, start the Consumer service:
    ```bash
-   python scripts/run_sqs_worker.py
+   make dev-consumer
    ```
 
 ### Docker Deployment
 
-1. Build and run with Docker Compose:
+The project includes separate Docker images for both services:
+
+1. Build the Docker images:
    ```bash
-   make docker-compose-up
+   # Build both images
+   make docker-build-all
+   
+   # Or build them separately
+   make docker-build-api
+   make docker-build-consumer
    ```
 
-2. To stop:
+2. Run the Docker containers:
    ```bash
-   make docker-compose-down
+   # Run the API service
+   make docker-run-api
+   
+   # In a separate terminal, run the Consumer service
+   make docker-run-consumer
    ```
 
 ## API Documentation
@@ -112,10 +132,15 @@ OPENSEARCH_URL=https://your-opensearch-domain.us-east-1.es.amazonaws.com
 
 The project includes a Makefile with several useful commands:
 - `make setup` - Set up the development environment
-- `make dev` - Run the development server
-- `make sqs-worker` - Run the SQS consumer worker
+- `make dev` - Run the API development server
+- `make dev-consumer` - Run the Consumer service
 - `make test` - Run tests
 - `make lint` - Run linters
+- `make docker-build-api` - Build the API service Docker image
+- `make docker-build-consumer` - Build the Consumer service Docker image
+- `make docker-build-all` - Build both Docker images
+- `make docker-run-api` - Run the API service Docker container
+- `make docker-run-consumer` - Run the Consumer service Docker container
 - `make deploy` - Deploy to AWS (requires AWS CLI setup)
 
 ## Project Structure
@@ -210,3 +235,34 @@ The task definitions are configured for the EC2 launch type with the following s
 - Dynamic host port mapping
 - Memory and CPU limits at the container level
 - Placement constraints for availability zone distribution 
+
+## Deployment Architecture
+
+The Ocelot Log Service consists of two separate deployable components:
+
+1. **API Service** (`Dockerfile.api`):
+   - Serves HTTP endpoints and WebSocket connections
+   - Handles authentication and tenant isolation
+   - Queries MongoDB and OpenSearch for log retrieval
+   - Sends log creation messages to SQS
+   - Stateless and horizontally scalable
+
+2. **Consumer Service** (`Dockerfile.consumer`):
+   - Processes messages from SQS queue
+   - Stores logs in MongoDB
+   - Indexes logs in OpenSearch
+   - Runs as a background service
+   - Can be scaled independently from the API service
+
+### Production Deployment
+
+In production, both services should be deployed and scaled independently:
+
+- **API Service**: Deploy behind a load balancer with auto-scaling
+- **Consumer Service**: Deploy as a scalable background service with no public access needed
+
+When deploying with AWS ECS:
+1. Create a task definition for each service
+2. Create a service for the API with a target group attached to an ALB
+3. Create a service for the Consumer with no load balancer
+4. Configure appropriate scaling policies for each service 
