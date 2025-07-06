@@ -21,6 +21,7 @@ setup(
         "dev": [
             "pytest",
             "pytest-cov",
+            "httpx",  # Required for FastAPI TestClient
         ]
     },
 ) 
