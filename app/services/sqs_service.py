@@ -30,8 +30,6 @@ class SQSService:
         )
         self.queue_url = settings.SQS_QUEUE_URL
         logger.info(f"SQS service initialized with queue URL: {self.queue_url}")
-        print(f"access key id: {settings.AWS_ACCESS_KEY_ID}")
-        print(f"secret access key: {settings.AWS_SECRET_ACCESS_KEY}")
         
     def send_message(self, message_body: Dict[str, Any]) -> Dict[str, Any]:
         """

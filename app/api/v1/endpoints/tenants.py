@@ -81,6 +81,10 @@ async def get_tenants(
     # Execute query with pagination
     tenants = list(collection.find().skip(skip).limit(limit))
     
+    # Convert MongoDB _id to id for response
+    for tenant in tenants:
+        tenant["id"] = str(tenant["_id"])
+    
     # Calculate pagination metadata
     page = skip // limit + 1 if limit > 0 else 1
     

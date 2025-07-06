@@ -301,26 +301,66 @@ class OpenSearchService:
     
     def delete_log(self, log_id: str) -> bool:
         """
-        Delete a log from OpenSearch.
+        Delete a specific log by ID.
         
         Args:
-            log_id: Log ID to delete
+            log_id: ID of the log to delete
             
         Returns:
-            True if deleted, False otherwise
+            True if deleted, False if not found
         """
         try:
             response = self.client.delete(
                 index=self.index_name,
                 id=log_id,
-                refresh=True
+                refresh=True  # Make the deletion immediately visible
             )
-            
+            logger.info(f"Deleted log with ID: {log_id}")
             return response["result"] == "deleted"
         except Exception as e:
             logger.error(f"Error deleting log: {str(e)}")
             return False
-
+            
+    def delete_old_logs(self, tenant_id: str, cutoff_date: datetime) -> int:
+        """
+        Delete logs older than the cutoff date for a specific tenant.
+        
+        Args:
+            tenant_id: The tenant ID to restrict deletion to
+            cutoff_date: Delete logs older than this date
+            
+        Returns:
+            Number of logs deleted
+        """
+        try:
+            # Build the query for old logs from this tenant
+            query = {
+                "bool": {
+                    "must": [
+                        {"term": {"tenant_id": tenant_id}},
+                        {"range": {"timestamp": {"lt": cutoff_date.isoformat()}}}
+                    ]
+                }
+            }
+            
+            logger.info(f"Deleting logs for tenant {tenant_id} older than {cutoff_date.isoformat()}")
+            
+            # Use delete by query API
+            response = self.client.delete_by_query(
+                index=self.index_name,
+                body={"query": query},
+                refresh=True  # Make the deletion immediately visible
+            )
+            
+            deleted_count = response.get("deleted", 0)
+            logger.info(f"Deleted {deleted_count} logs from OpenSearch")
+            
+            return deleted_count
+            
+        except Exception as e:
+            logger.error(f"Error deleting old logs: {str(e)}")
+            logger.error(f"Detailed error: {traceback.format_exc()}")
+            raise
 
 def get_opensearch_service() -> OpenSearchService:
     """
